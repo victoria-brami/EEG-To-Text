@@ -12,15 +12,31 @@ from glob import glob
 import time
 import copy
 from tqdm import tqdm
-
-from transformers import BartTokenizer, BartForConditionalGeneration, BartConfig
+import wandb
+from transformers import BertTokenizer, BertConfig,  BartTokenizer, BartForConditionalGeneration, BartConfig
 from data import ZuCo_dataset
 from model_decoding import BrainTranslator, BrainTranslatorNaive
 from nltk.translate.bleu_score import sentence_bleu, corpus_bleu
 from rouge import Rouge
 from config import get_config
+from sacrebleu.metrics import BLEU
 
-def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_results_path = './results/temp.txt' ):
+
+def filtered_trained_layers(model, ckpt):
+
+    b = {}
+    for k in ckpt.keys():
+        if "additional_encoder" in k:
+            new_k = k[8:]
+            b[new_k] = ckpt[k]
+    b["fc1.weight"] = ckpt["encoder.fc.weight"]
+    b["fc1.bias"] = ckpt["encoder.fc.bias"]
+
+    model.load_state_dict(b, strict=False)
+
+
+
+def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_results_path = './results/temp.txt', logger=None):
     # modified from: https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html
 
     model.eval()   # Set model to evaluate mode
@@ -54,7 +70,7 @@ def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_resu
             target_string_list.append(target_string)
             
             """replace padding ids in target_ids with -100"""
-            target_ids_batch[target_ids_batch == tokenizer.pad_token_id] = -100 
+            #target_ids_batch[target_ids_batch == tokenizer.pad_token_id] = -100 
 
             # target_ids_batch_label = target_ids_batch.clone().detach()
             # target_ids_batch_label[target_ids_batch_label == tokenizer.pad_token_id] = -100
@@ -81,7 +97,7 @@ def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_resu
             values, predictions = probs.topk(1)
             # print('predictions before squeeze:',predictions.size())
             predictions = torch.squeeze(predictions)
-            predicted_string = tokenizer.decode(predictions).split('</s></s>')[0].replace('<s>','')
+            predicted_string = tokenizer.decode(predictions).split('</s></s>')[0].replace('<s>','').replace('</s>','')
             # print('predicted string:',predicted_string)
             f.write(f'predicted string: {predicted_string}\n')
             f.write(f'################################################\n\n\n')
@@ -111,19 +127,49 @@ def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_resu
     epoch_loss = running_loss / dataset_sizes['test_set']
     print('test loss: {:4f}'.format(epoch_loss))
 
-    """ calculate corpus bleu score """
+    print(target_tokens_list[0], type(target_tokens_list))
+    print()
+    print(pred_tokens_list[0])   
+
+    tgt_decoded_list = [[tgt.split()] for tgt in target_string_list ]
+    pred_decoded_list = [p.split() for p in pred_string_list]
+
+    table = wandb.Table(columns=["Metric", "Value"])
+    sb_table = wandb.Table(columns=["Metric", "Value"])
+    tok_table = wandb.Table(columns=["Metric", "Value"])
+    """igalculate corpus bleu score """
+    bleu = BLEU()
+    sc = bleu.corpus_score(pred_string_list, [[t] for t in target_string_list])
+    print("SacreBLEU: ", sc)
+    sb_table.add_data(f"SacreBLEU-1 ", f"{sc.precisions[0]}")
+    sb_table.add_data(f"SacreBLEU-2 ", f"{sc.precisions[1]}")
+    sb_table.add_data(f"SacreBLEU-3 ", f"{sc.precisions[2]}")
+    sb_table.add_data(f"SacreBLEU-4 ", f"{sc.precisions[3]}")
+    sb_table.add_data(f"SacreBLEU ", f"{sc.score}")
+
+
     weights_list = [(1.0,),(0.5,0.5),(1./3.,1./3.,1./3.),(0.25,0.25,0.25,0.25)]
     for weight in weights_list:
         # print('weight:',weight)
         corpus_bleu_score = corpus_bleu(target_tokens_list, pred_tokens_list, weights = weight)
+        corpus_raw_score = corpus_bleu(tgt_decoded_list, pred_decoded_list, weights = weight)
+        tok_table.add_data(f'BLEU-{len(list(weight))} tok', f'{corpus_bleu_score}')
+        table.add_data(f'BLEU-{len(list(weight))} raw', f'{corpus_raw_score}')
         print(f'corpus BLEU-{len(list(weight))} score:', corpus_bleu_score)
-
+        print(f'corpus Raw BLEU-{len(list(weight))} score:', corpus_raw_score)
+    wandb.log({"RawBLEU Scores": table})
+    wandb.log({"tokBLEU Scores": tok_table})
+    wandb.log({"SacreBLEU Scores": sb_table})
     print()
     """ calculate rouge score """
     rouge = Rouge()
     rouge_scores = rouge.get_scores(pred_string_list,target_string_list, avg = True)
+    rg_table = wandb.Table(columns=["Metric", "f1 score", "precision", "recall"])
+    for rg in rouge_scores.keys():
+        rg_table.add_data(rg, f'{rouge_scores[rg]["f"]*100:.4f}', f'{rouge_scores[rg]["p"]*100:.4f}', f'{rouge_scores[rg]["r"]*100:.4f}')
     print(rouge_scores)
-
+    wandb.log({"ROUGE Scores": rg_table})
+    wandb.finish()
 
 if __name__ == '__main__': 
     ''' get args'''
@@ -139,17 +185,27 @@ if __name__ == '__main__':
     eeg_type_choice = training_config['eeg_type']
     print(f'[INFO]eeg type: {eeg_type_choice}')
     bands_choice = training_config['eeg_bands']
+    if "7_feats" in args['config_path']:
+        bands_choice = ['_t1','_t2','_a1','_a2','_b1','_b2','_g1']
+    else:
+        bands_choice = ['_t1','_t2','_a1','_a2','_b1','_b2','_g1','_g2']
     print(f'[INFO]using bands: {bands_choice}')
     
     dataset_setting = 'unique_sent'
 
     task_name = training_config['task_name']
     
+
+    wandb.init(project="EEG-To-Text", group="Eval", name=f'{len(bands_choice)}_{eeg_type_choice}_{subject_choice}')
     model_name = training_config['model_name']
     # model_name = 'BrainTranslator'
     # model_name = 'BrainTranslatorNaive'
+    from datetime import datetime
 
-    output_all_results_path = f'./results/{task_name}-{model_name}-all_decoding_results.txt'
+    now = datetime.now() 
+    
+    seed_val = 312
+    output_all_results_path = f'./results/{now.strftime("%Y-%m-%d")}_{task_name}-{model_name}_{seed_val}_decoding_results.txt'
     ''' set random seeds '''
     seed_val = 312
     np.random.seed(seed_val)
@@ -188,8 +244,13 @@ if __name__ == '__main__':
             whole_dataset_dicts.append(pickle.load(handle))
     print()
     
-    tokenizer = BartTokenizer.from_pretrained('facebook/bart-large')
-
+    # tokenizer = BartTokenizer.from_pretrained('facebook/bart-large')
+    if model_name in ['BrainTranslator','BrainTranslatorNaive']:
+        tokenizer = BartTokenizer.from_pretrained('facebook/bart-large')
+    elif model_name == 'BertGeneration':
+        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        config = BertConfig.from_pretrained("bert-base-uncased")
+        config.is_decoder = True
     # test dataset
     test_set = ZuCo_dataset(whole_dataset_dicts, 'test', tokenizer, subject = subject_choice, eeg_type = eeg_type_choice, bands = bands_choice, setting = dataset_setting)
 
@@ -206,11 +267,22 @@ if __name__ == '__main__':
     pretrained_bart = BartForConditionalGeneration.from_pretrained('facebook/bart-large')
     
     if model_name == 'BrainTranslator':
-        model = BrainTranslator(pretrained_bart, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
+        model = BrainTranslator(pretrained_bart, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=len(bands_choice), additional_encoder_dim_feedforward = 2048)
     elif model_name == 'BrainTranslatorNaive':
         model = BrainTranslatorNaive(pretrained_bart, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
+    elif model_name == 'BertGeneration':
+        from transformers import BertLMHeadModel
+        pretrained = BertLMHeadModel.from_pretrained('bert-base-uncased', config=config)
+        model = BrainTranslator(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 768, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
 
-    model.load_state_dict(torch.load(checkpoint_path))
+    if args["eval_trained_diffusion"]:
+        print('[INFO] We ARE Now evaluating the pretrained diffusion model: ', args['diffusion_checkpoint_path'])
+        diffusion_checkpoint_path = args['diffusion_checkpoint_path']
+        model.load_state_dict(torch.load(checkpoint_path, map_location=dev))
+        ckpt = torch.load(diffusion_checkpoint_path, map_location=dev)['model_dict']
+        filtered_trained_layers(model, ckpt)
+    else:
+        model.load_state_dict(torch.load(checkpoint_path, map_location=dev))
     model.to(device)
     
     criterion = nn.CrossEntropyLoss()

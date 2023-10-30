@@ -14,7 +14,8 @@ def get_config(case):
     if case == 'train_decoding': 
         # args config for training EEG-To-Text decoder
         parser = argparse.ArgumentParser(description='Specify config args for training EEG-To-Text decoder')
-        parser.add_argument('-nwork', '--num_workers', type=int, default=8) 
+        parser.add_argument('--data_folder', default='/disk/scratch3/s2616972')
+        
         parser.add_argument('-m', '--model_name', help='choose from {BrainTranslator, BrainTranslatorNaive}', default = "BrainTranslator" ,required=True)
         parser.add_argument('-t', '--task_name', help='choose from {task1,task1_task2, task1_task2_task3,task1_task2_taskNRv2}', default = "task1", required=True)
         
@@ -38,12 +39,9 @@ def get_config(case):
         parser.add_argument('-eeg', '--eeg_type', help='choose from {GD, FFD, TRT}', default = 'GD', required=False)
         parser.add_argument('-band', '--eeg_bands', nargs='+', help='specify freqency bands', default = ['_t1','_t2','_a1','_a2','_b1','_b2','_g1','_g2'] , required=False)
         parser.add_argument('-cuda', '--cuda', help='specify cuda device name, e.g. cuda:0, cuda:1, etc', default = 'cuda:0')
-
-        parser.add_argument('--wb_logger', help="activate wb logger", action='store_true')
-        parser.add_argument('--data_folder', help="", default='/disk/scratch/s2616972')
-        parser.add_argument('--tok', help="tokenizer used", default="facebook/bart-large")
-
-        args = parser.parse_args()
+	parser.add_argument('--wb_logger', help="activate wb logger", action='store_true')
+ 
+        args = vars(parser.parse_args())
 
     elif case == 'train_sentiment_baseline':
         # args config for training EEG-based sentiment baselines
@@ -78,8 +76,6 @@ def get_config(case):
     elif case == 'eval_decoding':
         # args config for evaluating EEG-To-Text decoder
         parser = argparse.ArgumentParser(description='Specify config args for evaluate EEG-To-Text decoder')
-        parser.add_argument("--eval_trained_diffusion", action='store_true')
-        parser.add_argument("--diffusion_checkpoint_path")
         parser.add_argument('-checkpoint', '--checkpoint_path', help='specify model checkpoint' ,required=True)
         parser.add_argument('-conf', '--config_path', help='specify training config json' ,required=True)
         parser.add_argument('-cuda', '--cuda', help='specify cuda device name, e.g. cuda:0, cuda:1, etc', default = 'cuda:0')
@@ -104,9 +100,6 @@ def get_config(case):
 
     return args
 
-from transformers import BertLMHeadModel, BartTokenizer, BartForConditionalGeneration, BartConfig, BartForSequenceClassification, BertTokenizer, BertConfig, BertForSequenceClassification, RobertaTokenizer, RobertaForSequenceClassification
-
-from data import ZuCo_dataset
 from model_decoding import BrainTranslator, BrainTranslatorNaive
 class DecoderConfig:
 
@@ -115,19 +108,9 @@ class DecoderConfig:
 
     one_step = True
     two_step = False
-    
-    if one_step:
-        skip_step_one=True
-    else:
-        skip_step_one = False
 
     pretrained = False
     rand_init = True
-
-    if rand_init:
-        use_random_init=True
-    else:
-        use_random_init = False
 
     load_step1_checkpoint = True
     not_load_step1_checkpoint = False
@@ -145,100 +128,7 @@ class DecoderConfig:
     eeg_bands = ['_t1', '_t2', '_a1', '_a2', '_b1', '_b2', '_g1', '_g2']
     cuda = 'cuda:0'
     wb_logger = True
-    data_folder = '/disk/scratch/s2616972'
-    num_workers = 8
-
-def self_update(cfg):
-    if cfg.one_step:
-        cfg.skip_step_one = True
-    else:
-        cfg.skip_step_one = False
-
-    if cfg.rand_init:
-        cfg.use_random_init=True
-    else:
-        cfg.use_random_init = False
-
-def update_config(args, config):
-    for attr in config.__dict__:
-        if not attr.startswith('__'):
-            if hasattr(args, attr):
-                if getattr(args, attr) != None:
-                    setattr(config, attr, getattr(args, attr))
-    self_update(config)
-    return config
-
-if __name__ == '__main__':
-    args = get_config('train_decoding')
 
 
-    cfg = DecoderConfig
-    cfg = update_config(args, cfg)
 
-    #logger = wandb_logger(cfg) if cfg.wb_logger else None
-    import json
-    args = vars(cfg)
-
-    ''' config param'''
-    dataset_setting = 'unique_sent'
-    
-    num_epoch_step1 = args['num_epoch_step1']
-    num_epoch_step2 = args['num_epoch_step2']
-    step1_lr = args['learning_rate_step1']
-    step2_lr = args['learning_rate_step2']
-    
-    batch_size = args['batch_size']
-    
-    model_name = args['model_name']
-    # model_name = 'BrainTranslatorNaive' # with no additional transformers
-    # model_name = 'BrainTranslator' 
-    
-    # task_name = 'task1'
-    # task_name = 'task1_task2'
-    # task_name = 'task1_task2_task3'
-    # task_name = 'task1_task2_taskNRv2'
-    task_name = args['task_name']
-
-    save_path = args['save_path']
-
-    skip_step_one = args['skip_step_one']
-    load_step1_checkpoint = args['load_step1_checkpoint']
-    use_random_init = args['use_random_init']
-
-    if use_random_init and skip_step_one:
-        step2_lr = 5*1e-4
-        
-    print(f'[INFO]using model: {model_name}')
-    
-    if skip_step_one:
-        save_name = f'{task_name}_finetune_{model_name}_skipstep1_b{batch_size}_{num_epoch_step1}_{num_epoch_step2}_{step1_lr}_{step2_lr}_{dataset_setting}'
-    else:
-        save_name = f'{task_name}_finetune_{model_name}_2steptraining_b{batch_size}_{num_epoch_step1}_{num_epoch_step2}_{step1_lr}_{step2_lr}_{dataset_setting}'
-    
-    if use_random_init:
-        save_name = 'randinit_' + save_name
-
-    output_checkpoint_name_best = save_path + f'/best/{save_name}.pt' 
-    output_checkpoint_name_last = save_path + f'/last/{save_name}.pt' 
-
-
-    # subject_choice = 'ALL
-    subject_choice = args['subjects']
-    print(f'![Debug]using {subject_choice}')
-    # eeg_type_choice = 'GD
-    eeg_type_choice = args['eeg_type']
-    print(f'[INFO]eeg type {eeg_type_choice}')
-    # bands_choice = ['_t1'] 
-    # bands_choice = ['_t1','_t2','_a1','_a2','_b1','_b2','_g1','_g2'] 
-    bands_choice = args['eeg_bands']
-    print(f'[INFO]using bands {bands_choice}')
-
-    with open(output_checkpoint_name_best.replace(".pt",".json").replace( "checkpoints", "config"), "w")as out_config:
-        config_json = dict(args)
-        sjson = dict()
-        ks = config_json.keys()
-        for k in ks:
-            if not k.startswith('__'):
-                sjson[k] = config_json[k]
-        json.dump(sjson, out_config, indent = 4)
 

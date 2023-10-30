@@ -16,14 +16,59 @@ from transformers import BertLMHeadModel, BartTokenizer, BartForConditionalGener
 
 from data import ZuCo_dataset
 from model_decoding import BrainTranslator, BrainTranslatorNaive
-from config import get_config
+from config import get_config, DecoderConfig
+import wandb
 
-def train_model(dataloaders, device, model, criterion, optimizer, scheduler, num_epochs=25, checkpoint_path_best = './checkpoints/decoding/best/temp_decoding.pt', checkpoint_path_last = './checkpoints/decoding/last/temp_decoding.pt'):
+import gc
+gc.collect()
+torch.cuda.empty_cache()
+
+class wandb_logger:
+    def __init__(self, config, group='EEG-decoding-step-1'):
+        wandb.init(
+            project="EEG-To-Text",
+            anonymous="allow",
+            group=group,
+            config=config,
+            reinit=True)
+
+        self.config = config
+        self.step = None
+
+    def log(self, name, data, step=None):
+        if step is None:
+            wandb.log({name: data})
+        else:
+            wandb.log({name: data}, step=step)
+            self.step = step
+
+    def watch_model(self, *args, **kwargs):
+        wandb.watch(*args, **kwargs)
+
+    def log_image(self, name, fig):
+        if self.step is None:
+            wandb.log({name: wandb.Image(fig)})
+        else:
+            wandb.log({name: wandb.Image(fig)}, step=self.step)
+
+    def finish(self):
+        wandb.finish(quiet=True)
+
+
+def train_model(dataloaders, device,
+                model, criterion,
+                optimizer, scheduler, num_epochs=25,
+                checkpoint_path_best = './checkpoints/decoding/best/temp_decoding.pt',
+                checkpoint_path_last = './checkpoints/decoding/last/temp_decoding.pt',
+                logger=None):
     # modified from: https://pytorch.org/tutorials/beginner/transfer_learning_tutorial.html
     since = time.time()
       
     best_model_wts = copy.deepcopy(model.state_dict())
     best_loss = 100000000000
+
+    if logger is not None:
+        logger.watch_model(model, log='all', log_freq=1000)
     
 
     for epoch in range(num_epochs):
@@ -36,6 +81,8 @@ def train_model(dataloaders, device, model, criterion, optimizer, scheduler, num
                 model.train()  # Set model to training mode
             else:
                 model.eval()   # Set model to evaluate mode
+            total_loss = []
+            loss_weights = []
 
             running_loss = 0.0
 
@@ -48,7 +95,7 @@ def train_model(dataloaders, device, model, criterion, optimizer, scheduler, num
                 input_mask_invert_batch = input_mask_invert.to(device)
                 target_ids_batch = target_ids.to(device)
                 """replace padding ids in target_ids with -100"""
-                target_ids_batch[target_ids_batch == tokenizer.pad_token_id] = 0 
+                target_ids_batch[target_ids_batch == tokenizer.pad_token_id] = -100 
               
                 # zero the parameter gradients
                 optimizer.zero_grad()
@@ -90,7 +137,11 @@ def train_model(dataloaders, device, model, criterion, optimizer, scheduler, num
                 running_loss += loss.item() * input_embeddings_batch.size()[0] # batch loss
                 # print('[DEBUG]loss:',loss.item())
                 # print('#################################')
-                
+
+                total_loss.append(loss.item())
+                loss_weights.append(input_embeddings_batch.size()[0])
+
+
 
             if phase == 'train':
                 scheduler.step()
@@ -99,6 +150,8 @@ def train_model(dataloaders, device, model, criterion, optimizer, scheduler, num
 
             print('{} Loss: {:.4f}'.format(phase, epoch_loss))
 
+
+
             # deep copy the model
             if phase == 'dev' and epoch_loss < best_loss:
                 best_loss = epoch_loss
@@ -106,13 +159,24 @@ def train_model(dataloaders, device, model, criterion, optimizer, scheduler, num
                 '''save checkpoint'''
                 torch.save(model.state_dict(), checkpoint_path_best)
                 print(f'update best on dev checkpoint: {checkpoint_path_best}')
-        print()
+            print()
+
+            if logger is not None:
+                lr = optimizer.param_groups[0]["lr"]
+                logger.log(f'{phase}_loss_step', np.array(total_loss)*np.array(loss_weights) / np.sum(loss_weights), step=epoch)
+                logger.log('lr', lr, step=epoch)
+                if since is not None:
+                    logger.log('time (min)', (time.time() - since) / 60.0, step=epoch)
 
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
     print('Best val loss: {:4f}'.format(best_loss))
     torch.save(model.state_dict(), checkpoint_path_last)
     print(f'update last checkpoint: {checkpoint_path_last}')
+
+    if logger is not None:
+        logger.log('Best Loss', best_loss, step=num_epochs-1)
+        logger.finish()
 
     # load best model weights
     model.load_state_dict(best_model_wts)
@@ -126,14 +190,34 @@ def show_require_grad_layers(model):
         if param.requires_grad:
             print(' ', name)
 
+def update_config(args, config):
+    for attr in config.__dict__:
+        if not attr.startswith('__'):
+            if hasattr(args, attr):
+                if getattr(args, attr) != None:
+                    print("Attribute to change", attr)
+                    setattr(config, attr, getattr(args, attr))
+    return config
+
 if __name__ == '__main__':
     args = get_config('train_decoding')
+
+
+    cfg = DecoderConfig
+    cfg = update_config(args, cfg)
+
+    # logger = wandb_logger(cfg) if cfg.wb_logger else None
+
+    args = vars(cfg)
+    print(args)
+    print()
+    print(cfg.__dict__)
 
     ''' config param'''
     dataset_setting = 'unique_sent'
     
-    num_epochs_step1 = args['num_epoch_step1']
-    num_epochs_step2 = args['num_epoch_step2']
+    num_epoch_step1 = args['num_epoch_step1']
+    num_epoch_step2 = args['num_epoch_step2']
     step1_lr = args['learning_rate_step1']
     step2_lr = args['learning_rate_step2']
     
@@ -150,7 +234,6 @@ if __name__ == '__main__':
     task_name = args['task_name']
 
     save_path = args['save_path']
-    data_folder = args['data_folder']
 
     skip_step_one = args['skip_step_one']
     load_step1_checkpoint = args['load_step1_checkpoint']
@@ -162,9 +245,9 @@ if __name__ == '__main__':
     print(f'[INFO]using model: {model_name}')
     
     if skip_step_one:
-        save_name = f'{task_name}_finetune_{model_name}_skipstep1_b{batch_size}_{num_epochs_step1}_{num_epochs_step2}_{step1_lr}_{step2_lr}_{dataset_setting}'
+        save_name = f'{task_name}_finetune_{model_name}_skipstep1_b{batch_size}_{num_epoch_step1}_{num_epoch_step2}_{step1_lr}_{step2_lr}_{dataset_setting}'
     else:
-        save_name = f'{task_name}_finetune_{model_name}_2steptraining_b{batch_size}_{num_epochs_step1}_{num_epochs_step2}_{step1_lr}_{step2_lr}_{dataset_setting}'
+        save_name = f'{task_name}_finetune_{model_name}_2steptraining_b{batch_size}_{num_epoch_step1}_{num_epoch_step2}_{step1_lr}_{step2_lr}_{dataset_setting}'
     
     if use_random_init:
         save_name = 'randinit_' + save_name
@@ -208,39 +291,42 @@ if __name__ == '__main__':
     ''' set up dataloader '''
     whole_dataset_dicts = []
     if 'task1' in task_name:
-        dataset_path_task1 = data_folder + '/dataset/ZuCo/task1-SR/pickle/task1-SR-dataset.pickle' 
+        dataset_path_task1 = './dataset/ZuCo/task1-SR/pickle/task1-SR-dataset.pickle' 
         with open(dataset_path_task1, 'rb') as handle:
             whole_dataset_dicts.append(pickle.load(handle))
     if 'task2' in task_name:
-        dataset_path_task2 = data_folder + '/dataset/ZuCo/task2-NR/pickle/task2-NR-dataset.pickle' 
+        dataset_path_task2 = './dataset/ZuCo/task2-NR/pickle/task2-NR-dataset.pickle' 
         with open(dataset_path_task2, 'rb') as handle:
             whole_dataset_dicts.append(pickle.load(handle))
     if 'task3' in task_name:
-        dataset_path_task3 = data_folder + '/dataset/ZuCo/task3-TSR/pickle/task3-TSR-dataset.pickle' 
+        dataset_path_task3 = './dataset/ZuCo/task3-TSR/pickle/task3-TSR-dataset.pickle' 
         with open(dataset_path_task3, 'rb') as handle:
             whole_dataset_dicts.append(pickle.load(handle))
     if 'taskNRv2' in task_name:
-        dataset_path_taskNRv2 = data_folder + '/dataset/ZuCo/task2-NR-2.0/pickle/task2-NR-2.0-dataset.pickle' 
+        dataset_path_taskNRv2 = './dataset/ZuCo/task2-NR-2.0/pickle/task2-NR-2.0-dataset.pickle' 
         with open(dataset_path_taskNRv2, 'rb') as handle:
             whole_dataset_dicts.append(pickle.load(handle))
 
     print()
 
     """save config"""
-    os.makedirs("./config/decoding/", exist_ok=True)
+    print("\n\n OUTPUT COMFOGUTATION IS", args)
+    
     with open(f'./config/decoding/{save_name}.json', 'w') as out_config:
-        json.dump(args, out_config, indent = 4)
-
+        config_json = dict(args)
+        sjson = dict()
+        ks = config_json.keys()
+        for k in ks:
+            if not k.startswith('__'):
+                sjson[k] = config_json[k]
+        json.dump(sjson, out_config, indent = 4)
+    logger = wandb_logger(sjson) if sjson['wb_logger'] else None
 
     if model_name in ['BrainTranslator','BrainTranslatorNaive']:
-        if args.tok == "facebook/bart-large":
-            tokenizer = BartTokenizer.from_pretrained('facebook/bart-large')
-        else:
-            tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-
+        tokenizer = BartTokenizer.from_pretrained('facebook/bart-large')
     elif model_name == 'BertGeneration':
         tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
-        config = BertConfig.from_pretrained("bert-base-uncased")
+        config = BertConfig.from_pretrained("bert-base-cased")
         config.is_decoder = True
 
     # train dataset
@@ -269,14 +355,14 @@ if __name__ == '__main__':
         else:
             pretrained = BartForConditionalGeneration.from_pretrained('facebook/bart-large')
     
-        model = BrainTranslator(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
+        model = nn.DataParallel(BrainTranslator(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048))
     
     elif model_name == 'BertGeneration':
-        pretrained = BertLMHeadModel.from_pretrained('bert-base-uncased', config=config)
-        model = BrainTranslator(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 768, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
+        pretrained = BertLMHeadModel.from_pretrained('bert-base-cased', config=config)
+        model = nn.DataParallel(BrainTranslator(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 768, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048))
     elif model_name == 'BrainTranslatorNaive':
         pretrained = BartForConditionalGeneration.from_pretrained('facebook/bart-large')
-        model = BrainTranslatorNaive(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048)
+        model = nn.DataParallel(BrainTranslatorNaive(pretrained, in_feature = 105*len(bands_choice), decoder_embedding_size = 1024, additional_encoder_nhead=8, additional_encoder_dim_feedforward = 2048))
 
     model.to(device)
     
@@ -322,9 +408,14 @@ if __name__ == '__main__':
 
         print('=== start Step1 training ... ===')
         # print training layers
-        show_require_grad_layers(model)
+        # show_require_grad_layers(model)
         # return best loss model from step1 training
-        model = train_model(dataloaders, device, model, criterion, optimizer_step1, exp_lr_scheduler_step1, num_epochs=num_epochs_step1, checkpoint_path_best = output_checkpoint_name_best, checkpoint_path_last = output_checkpoint_name_last)
+        model = train_model(dataloaders, device, model, criterion,
+                            optimizer_step1, exp_lr_scheduler_step1,
+                            num_epochs=num_epoch_step1,
+                            checkpoint_path_best = output_checkpoint_name_best,
+                            checkpoint_path_last = output_checkpoint_name_last,
+                            logger=logger)
 
     ######################################################
     '''step two trainig: update whole model for a few iterations'''
@@ -343,10 +434,20 @@ if __name__ == '__main__':
     print()
     print('=== start Step2 training ... ===')
     # print training layers
-    show_require_grad_layers(model)
+    # show_require_grad_layers(model)
+    logger = wandb_logger(sjson, group="stage2_decoding") if cfg.wb_logger else None
+
+    if logger is not None:
+        logger.watch_model(model, log='all', log_freq=1000)
     
     '''main loop'''
-    trained_model = train_model(dataloaders, device, model, criterion, optimizer_step2, exp_lr_scheduler_step2, num_epochs=num_epochs_step2, checkpoint_path_best = output_checkpoint_name_best, checkpoint_path_last = output_checkpoint_name_last)
+    trained_model = train_model(dataloaders, device, model,
+                                criterion, optimizer_step2, exp_lr_scheduler_step2,
+                                num_epochs=num_epoch_step2,
+                                checkpoint_path_best = output_checkpoint_name_best,
+                                checkpoint_path_last = output_checkpoint_name_last,
+                                logger=logger)
+
 
     # '''save checkpoint'''
     # torch.save(trained_model.state_dict(), os.path.join(save_path,output_checkpoint_name))
