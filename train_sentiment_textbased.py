@@ -14,9 +14,9 @@ import copy
 from tqdm import tqdm
 
 from transformers import BartTokenizer, BartForConditionalGeneration, BartConfig, BartForSequenceClassification, BertTokenizer, BertConfig, BertForSequenceClassification, RobertaTokenizer, RobertaForSequenceClassification
-from data import ZuCo_dataset, SST_tenary_dataset
+from old.data import ZuCo_dataset, SST_tenary_dataset
 from model_sentiment import FineTunePretrainedTwoStep
-from config import get_config
+from old.config import get_config
 # Function to calculate the accuracy of our predictions vs labels
 def flat_accuracy(preds, labels):
     # preds: numpy array: N * 3 

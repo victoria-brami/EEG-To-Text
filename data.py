@@ -56,6 +56,8 @@ def get_input_sample(sent_obj, tokenizer, eeg_type = 'GD', bands = ['_t1','_t2',
     target_tokenized = tokenizer(target_string, padding='max_length', max_length=max_len, truncation=True, return_tensors='pt', return_attention_mask = True)
     
     input_sample['target_ids'] = target_tokenized['input_ids'][0]
+    input_sample["content"] = [target_string]
+
     
     # get sentence level EEG features
     sent_level_eeg_tensor = get_sent_eeg(sent_obj, bands)
@@ -137,14 +139,19 @@ def get_input_sample(sent_obj, tokenizer, eeg_type = 'GD', bands = ['_t1','_t2',
     return input_sample
 
 class ZuCo_dataset(Dataset):
-    def __init__(self, input_dataset_dicts, phase, tokenizer, subject = 'ALL', eeg_type = 'GD', bands = ['_t1','_t2','_a1','_a2','_b1','_b2','_g1','_g2'], setting = 'unique_sent', is_add_CLS_token = False):
+    def __init__(self, input_dataset_dicts, phase, tokenizer, subject = 'ALL', 
+                 eeg_type = 'GD', bands = ['_t1','_t2','_a1','_a2','_b1','_b2','_g1','_g2'], s
+                 etting = 'unique_sent', 
+                 is_add_CLS_token = False,
+                 task_name = [],
+                 ):
         self.inputs = []
         self.tokenizer = tokenizer
 
         if not isinstance(input_dataset_dicts,list):
             input_dataset_dicts = [input_dataset_dicts]
         print(f'[INFO]loading {len(input_dataset_dicts)} task datasets')
-        for input_dataset_dict in input_dataset_dicts:
+        for t, input_dataset_dict in enumerate(input_dataset_dicts):
             if subject == 'ALL':
                 subjects = list(input_dataset_dict.keys())
                 print('[INFO]using subjects: ', subjects)
@@ -167,6 +174,7 @@ class ZuCo_dataset(Dataset):
                         for i in range(train_divider):
                             input_sample = get_input_sample(input_dataset_dict[key][i],self.tokenizer,eeg_type,bands = bands, add_CLS_token = is_add_CLS_token)
                             if input_sample is not None:
+                                input_sample["subject"] = [subjects.index(key), key]
                                 self.inputs.append(input_sample)
                 elif phase == 'dev':
                     print('[INFO]initializing a dev set...')
@@ -174,6 +182,7 @@ class ZuCo_dataset(Dataset):
                         for i in range(train_divider,dev_divider):
                             input_sample = get_input_sample(input_dataset_dict[key][i],self.tokenizer,eeg_type,bands = bands, add_CLS_token = is_add_CLS_token)
                             if input_sample is not None:
+                                input_sample["subject"] = [subjects.index(key), key]
                                 self.inputs.append(input_sample)
                 elif phase == 'test':
                     print('[INFO]initializing a test set...')
@@ -181,7 +190,10 @@ class ZuCo_dataset(Dataset):
                         for i in range(dev_divider,total_num_sentence):
                             input_sample = get_input_sample(input_dataset_dict[key][i],self.tokenizer,eeg_type,bands = bands, add_CLS_token = is_add_CLS_token)
                             if input_sample is not None:
+                                input_sample["task"] = task_name[t]
+                                input_sample["subject"] = [subjects.index(key), key]
                                 self.inputs.append(input_sample)
+                                
             elif setting == 'unique_subj':
                 print('WARNING!!! only implemented for SR v1 dataset ')
                 # subject ['ZAB', 'ZDM', 'ZGW', 'ZJM', 'ZJN', 'ZJS', 'ZKB', 'ZKH', 'ZKW'] for train
@@ -231,44 +243,6 @@ class ZuCo_dataset(Dataset):
         # keys: input_embeddings, input_attn_mask, input_attn_mask_invert, target_ids, target_mask, 
 
 
-"""for train classifier on stanford sentiment treebank text-sentiment pairs"""
-class SST_tenary_dataset(Dataset):
-    def __init__(self, ternary_labels_dict, tokenizer, max_len = 56, balance_class = True):
-        self.inputs = []
-        
-        pos_samples = []
-        neg_samples = []
-        neu_samples = []
-
-        for key,value in ternary_labels_dict.items():
-            tokenized_inputs = tokenizer(key, padding='max_length', max_length=max_len, truncation=True, return_tensors='pt', return_attention_mask = True)
-            input_ids = tokenized_inputs['input_ids'][0]
-            attn_masks = tokenized_inputs['attention_mask'][0]
-            label = torch.tensor(value)
-            # count:
-            if value == 0:
-                neg_samples.append((input_ids,attn_masks,label))
-            elif value == 1:
-                neu_samples.append((input_ids,attn_masks,label))
-            elif value == 2:
-                pos_samples.append((input_ids,attn_masks,label))
-        print(f'Original distribution:\n\tVery positive: {len(pos_samples)}\n\tNeutral: {len(neu_samples)}\n\tVery negative: {len(neg_samples)}')    
-        if balance_class:
-            print(f'balance class to {min([len(pos_samples),len(neg_samples),len(neu_samples)])} each...')
-            for i in range(min([len(pos_samples),len(neg_samples),len(neu_samples)])):
-                self.inputs.append(pos_samples[i])
-                self.inputs.append(neg_samples[i])
-                self.inputs.append(neu_samples[i])
-        else:
-            self.inputs = pos_samples + neg_samples + neu_samples
-        
-    def __len__(self):
-        return len(self.inputs)
-
-    def __getitem__(self, idx):
-        input_sample = self.inputs[idx]
-        return input_sample
-        # keys: input_embeddings, input_attn_mask, input_attn_mask_invert, target_ids, target_mask, 
         
 
 

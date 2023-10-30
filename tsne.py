@@ -76,7 +76,7 @@ def show_tsne_plot(vects_sne, data, subjects, d, output_path, config=None, show=
         rows=1, cols=2,
         subplot_titles=("Per Subject", "Per Sentence"))
     
-    if config.tsne.plot_all_subjects:
+    if config.tsne_plot_all_subjects:
         for s in subjects:
             indexes = list(df.index[df["subject"] == s])
             fig.add_trace(go.Scatter(x=vects_sne[indexes, 0],
@@ -100,13 +100,13 @@ def show_tsne_plot(vects_sne, data, subjects, d, output_path, config=None, show=
                       yaxis2_range=[-2.5, 2.5],
                     title_text=f"{config.eeg_data.task_name[0]} TSNE Plot Perplexity {config.perplexity}")
     else:
-        if config.tsne.plot_task_wise:
-            if config.eeg_data.specific_subjects is None:
+        if config.tsne_plot_task_wise:
+            if config.specific_subjects is None:
                import random
-               config.eeg_data.specific_subjects = [random.choice(subjects)]
-            print(f"\033[1m\033[93m Selected Subject : {config.eeg_data.specific_subjects} \033[0m")
-            for s in config.eeg_data.specific_subjects:
-                for i, task in enumerate(config.eeg_data.task_name):
+               config.specific_subjects = [random.choice(subjects)]
+            print(f"\033[1m\033[93m Selected Subject : {config.specific_subjects} \033[0m")
+            for s in config.specific_subjects:
+                for i, task in enumerate(config.task_name):
                     indexes = list(df[(df["subject"] == s) & (df["task"] == task)].index)
                     fig.add_trace(go.Scatter(x=vects_sne[indexes, 0],
                                     y=vects_sne[indexes, 1],

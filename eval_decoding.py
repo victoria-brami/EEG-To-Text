@@ -69,8 +69,7 @@ def eval_model(dataloaders, device, tokenizer, criterion, model, output_all_resu
             target_tokens_list.append([target_tokens])
             target_string_list.append(target_string)
             
-            """replace padding ids in target_ids with -100"""
-            #target_ids_batch[target_ids_batch == tokenizer.pad_token_id] = -100 
+            
 
             # target_ids_batch_label = target_ids_batch.clone().detach()
             # target_ids_batch_label[target_ids_batch_label == tokenizer.pad_token_id] = -100
@@ -242,7 +241,7 @@ if __name__ == '__main__':
         dataset_path_taskNRv2 = './dataset/ZuCo/task2-NR-2.0/pickle/task2-NR-2.0-dataset.pickle' 
         with open(dataset_path_taskNRv2, 'rb') as handle:
             whole_dataset_dicts.append(pickle.load(handle))
-    print()
+
     
     # tokenizer = BartTokenizer.from_pretrained('facebook/bart-large')
     if model_name in ['BrainTranslator','BrainTranslatorNaive']:
